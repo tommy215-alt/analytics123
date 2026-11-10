@@ -184,3 +184,37 @@ test("parseMidi は MIDI でないデータや空のデータを断る", () => {
   assert.throws(() => parseMidi(new Uint8Array([1, 2, 3])), /MIDI ファイルではない/);
   assert.throws(() => parseMidi(buildMidi([[0, 0xff, 0x2f, 0]])), /音符が見つかりません/);
 });
+
+// ---- 歌声からのメロディ読み取り ----
+const { extractMelody, downsample } = await import("../lib/otomad/melody.ts");
+
+test("extractMelody は続けて鳴る音を、高さごとの音符に分ける", () => {
+  const signal = join([silence(0.2), tone(220, 0.3), silence(0.15), tone(329.63, 0.3), silence(0.1), tone(261.63, 0.4), tone(293.66, 0.3), silence(0.2)]);
+  const notes = extractMelody(signal, RATE);
+  assert.deepEqual(notes.map((n) => n.midi), [57, 64, 60, 62]);
+  const starts = [0.2, 0.65, 1.05, 1.45];
+  notes.forEach((note, i) => {
+    assert.ok(Math.abs(note.time - starts[i]) < 0.06, `音符${i}の開始 ${note.time}`);
+    assert.ok(note.dur > 0.2 && note.dur < 0.5, `音符${i}の長さ ${note.dur}`);
+    assert.ok(note.vel > 0 && note.vel <= 1);
+  });
+});
+
+test("extractMelody は無音・雑音・短すぎる音からは音符を作らない", () => {
+  assert.deepEqual(extractMelody(silence(1), RATE), []);
+  assert.deepEqual(extractMelody(new Float32Array(100), RATE), []);
+  let seed = 3;
+  const noise = new Float32Array(RATE).map(() => {
+    seed = (seed * 16807) % 2147483647;
+    return ((seed / 2147483647) * 2 - 1) * 0.3;
+  });
+  assert.deepEqual(extractMelody(noise, RATE), []);
+  assert.deepEqual(extractMelody(join([silence(0.3), tone(440, 0.03), silence(0.3)]), RATE), []);
+});
+
+test("downsample は約11kHzまで間引く", () => {
+  const { data, rate } = downsample(tone(220, 1), RATE);
+  assert.equal(rate, 11025);
+  assert.equal(data.length, 11025);
+  assert.equal(downsample(tone(220, 0.1), 11025).rate, 11025);
+});

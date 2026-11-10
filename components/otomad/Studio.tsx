@@ -3,24 +3,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { analyze, hzToMidi, makeDemoVoice, noteName, type Slice } from "@/lib/otomad/analyze";
 import { arrange, encodeWav, pickLeads } from "@/lib/otomad/arrange";
+import { extractMelody } from "@/lib/otomad/melody";
 import { parseMidi } from "@/lib/otomad/midi";
-import { schedule, songSeconds } from "@/lib/otomad/render";
+import { schedule, songSeconds, type BackingStems } from "@/lib/otomad/render";
+import { MIN_VOCAL_SHARE, mixStems, separate, toAudioBuffer, toModelInput, toMono, vocalShare } from "@/lib/otomad/separator";
 import { generateSong, STYLES, type Song, type Style } from "@/lib/otomad/song";
 
-/** 一度に切り分けて使う長さの上限(秒) */
+/** 一度に切り分けて使う声ネタの長さの上限(秒) */
 const MAX_VOICE_SEC = 90;
+/** 好きな曲として一度に使う長さの上限(秒) */
+const MAX_SONG_SEC = 180;
 /** 読み込んだ素材として保持する長さの上限(秒)。長い動画はここまでを読み込む */
 const MAX_SOURCE_SEC = 600;
 const MAX_FILE_BYTES = 500 * 1024 * 1024;
 
 type Voice = { buffer: AudioBuffer; name: string; slices: Slice[] };
 
-/** 読み込んだ元の素材(音声だけを取り出して1本にまとめたもの) */
+/** 読み込んだ元の素材(音声を取り出して1本にまとめたもの) */
 type Source = { buffer: AudioBuffer; name: string; videoUrl: string | null };
 
-const mmss = (sec: number): string => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
+/** 自分で選んだ曲(MIDI、または音声から読み取ったもの) */
+type CustomSong = { song: Song; stems?: BackingStems; /** 歌声から読み取ったか(false なら伴奏の主旋律から) */ fromVocals?: boolean };
 
 type AudioWindow = Window & { webkitAudioContext?: typeof AudioContext };
+
+const mmss = (sec: number): string => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
 
 function drawWave(canvas: HTMLCanvasElement, voice: Voice, enabled: boolean[], leads: number[]) {
   const ratio = window.devicePixelRatio || 1;
@@ -54,29 +61,96 @@ function drawWave(canvas: HTMLCanvasElement, voice: Voice, enabled: boolean[], l
   }
 }
 
+/** 場面(開始位置と長さ)を選ぶ部品。動画ならプレビューも出す */
+function RangePicker({
+  source,
+  start,
+  length,
+  maxLength,
+  actionLabel,
+  disabled,
+  onStart,
+  onLength,
+  onApply,
+}: {
+  source: Source;
+  start: number;
+  length: number;
+  maxLength: number;
+  actionLabel: string;
+  disabled?: boolean;
+  onStart: (value: number) => void;
+  onLength: (value: number) => void;
+  onApply: () => void;
+}) {
+  const video = useRef<HTMLVideoElement>(null);
+  return (
+    <div className="otomad-range">
+      {source.videoUrl && (
+        // eslint-disable-next-line jsx-a11y/media-has-caption
+        <video ref={video} src={source.videoUrl} controls playsInline preload="metadata" />
+      )}
+      <p className="sub">
+        {source.name}・音声 {mmss(source.buffer.duration)}
+        {source.buffer.duration >= MAX_SOURCE_SEC - 1 ? "(先頭10分まで読み込みました)" : ""}。使いたい場面を選んでください(一度に{maxLength}秒まで)。
+      </p>
+      <div className="sliders">
+        <label>
+          <span>開始 {mmss(start)}</span>
+          <input type="range" min={0} max={Math.max(0, Math.floor(source.buffer.duration - 1))} step={0.5} value={start} onChange={(e) => onStart(Number(e.target.value))} />
+        </label>
+        <label>
+          <span>長さ {length}秒</span>
+          <input type="range" min={2} max={maxLength} step={1} value={length} onChange={(e) => onLength(Number(e.target.value))} />
+        </label>
+      </div>
+      <div className="otomad-buttons" style={{ marginTop: 8 }}>
+        {source.videoUrl && (
+          <button className="btn" type="button" onClick={() => onStart(Math.floor((video.current?.currentTime ?? 0) * 2) / 2)}>
+            動画の再生位置を開始にする
+          </button>
+        )}
+        <button className="btn primary" type="button" onClick={onApply} disabled={disabled}>
+          {actionLabel}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function Studio() {
   const ctxRef = useRef<AudioContext | null>(null);
   const stopRef = useRef<(() => void) | null>(null);
   const endTimer = useRef<number | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
+
+  // 声ネタ
   const [source, setSource] = useState<Source | null>(null);
   const [rangeStart, setRangeStart] = useState(0);
   const [rangeLength, setRangeLength] = useState(30);
-
   const [voice, setVoice] = useState<Voice | null>(null);
+  /** 「声だけにする」をする前の音(元に戻す用) */
+  const [beforeIsolation, setBeforeIsolation] = useState<{ buffer: AudioBuffer; name: string } | null>(null);
   const [enabled, setEnabled] = useState<boolean[]>([]);
+
+  // 曲
+  const [songMode, setSongMode] = useState<"auto" | "custom">("auto");
   const [style, setStyle] = useState<Style>("four");
   const [seed, setSeed] = useState(1);
   const [bpm, setBpm] = useState<number | null>(null);
-  const [midiSong, setMidiSong] = useState<Song | null>(null);
+  const [custom, setCustom] = useState<CustomSong | null>(null);
+  const [songSource, setSongSource] = useState<Source | null>(null);
+  const [songStart, setSongStart] = useState(0);
+  const [songLength, setSongLength] = useState(60);
+
   const [shots, setShots] = useState(true);
   const [voiceDrums, setVoiceDrums] = useState(true);
   const [transpose, setTranspose] = useState(0);
   const [mix, setMix] = useState({ voice: 1, backing: 0.7, drums: 0.8 });
   const [playing, setPlaying] = useState(false);
   const [recording, setRecording] = useState(false);
+  /** 時間のかかる処理の進み具合(空なら何もしていない) */
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [download, setDownload] = useState<{ url: string; name: string } | null>(null);
@@ -101,10 +175,13 @@ export function Studio() {
 
   useEffect(() => stop, [stop]);
 
+  const usingCustom = songMode === "custom" && custom !== null;
+  const stems = usingCustom ? custom.stems : undefined;
+
   const song = useMemo<Song>(() => {
-    if (midiSong) return bpm ? { ...midiSong, bpm } : midiSong;
+    if (usingCustom) return bpm && !custom.stems ? { ...custom.song, bpm } : custom.song;
     return generateSong(seed, style, bpm ?? undefined);
-  }, [midiSong, seed, style, bpm]);
+  }, [usingCustom, custom, seed, style, bpm]);
 
   // 使う声ネタだけを取り出した一覧と、元の番号との対応
   const active = useMemo(() => {
@@ -119,7 +196,8 @@ export function Studio() {
     if (voice && canvasRef.current) drawWave(canvasRef.current, voice, enabled, leads);
   }, [voice, enabled, leads]);
 
-  const adoptBuffer = useCallback((buffer: AudioBuffer, name: string) => {
+  /** 音声を切り分けて、声ネタとして採用する。音が見つからなければ false */
+  const adoptBuffer = useCallback((buffer: AudioBuffer, name: string): boolean => {
     const mono = new Float32Array(buffer.length);
     for (let c = 0; c < buffer.numberOfChannels; c++) {
       const data = buffer.getChannelData(c);
@@ -127,29 +205,78 @@ export function Studio() {
     }
     const slices = analyze(mono, buffer.sampleRate);
     if (slices.length === 0) {
-      setError("音が検出できませんでした。もう少し大きな音の素材で試してください。");
-      return;
+      setError("音が検出できませんでした。もう少し大きな音の素材や、別の場面で試してください。");
+      return false;
     }
     setError("");
-    setDownload(null);
     setVoice({ buffer, name, slices });
     setEnabled(slices.map(() => true));
-    setSeed(Math.floor(Math.random() * 100000) + 1);
+    return true;
   }, []);
 
-  /** 元の素材のうち、指定した範囲だけを切り出して解析する */
-  const applyRange = useCallback(
-    (from: Source, start: number, length: number) => {
+  /** ファイル(音声・動画)を読み込み、音声だけをステレオのまま1本にまとめる */
+  const decodeFiles = useCallback(
+    async (files: File[]): Promise<Source> => {
+      const ctx = audio();
+      const decoded: AudioBuffer[] = [];
+      for (const file of files) decoded.push(await ctx.decodeAudioData(await file.arrayBuffer()));
+      const gap = decoded.length > 1 ? Math.floor(ctx.sampleRate * 0.15) : 0;
+      const limit = Math.floor(ctx.sampleRate * MAX_SOURCE_SEC);
+      const total = Math.max(1, Math.min(limit, decoded.reduce((sum, b) => sum + b.length + gap, 0) - gap));
+      const joined = ctx.createBuffer(2, total, ctx.sampleRate);
+      let offset = 0;
+      for (const buffer of decoded) {
+        for (let c = 0; c < 2; c++) {
+          // モノラルの素材は、同じ音を左右に入れる
+          const data = buffer.getChannelData(Math.min(c, buffer.numberOfChannels - 1));
+          const out = joined.getChannelData(c);
+          for (let i = 0; i < data.length && offset + i < total; i++) out[offset + i] = data[i];
+        }
+        offset += buffer.length + gap;
+        if (offset >= total) break;
+      }
+      const single = files.length === 1 ? files[0] : null;
+      return {
+        buffer: joined,
+        name: single ? single.name : `${files.length}個の素材`,
+        videoUrl: single && single.type.startsWith("video/") ? URL.createObjectURL(single) : null,
+      };
+    },
+    [audio],
+  );
+
+  const checkFiles = useCallback((files: FileList | null): File[] | null => {
+    if (!files || files.length === 0) return null;
+    const list = Array.from(files).slice(0, 12);
+    if (list.some((file) => file.size > MAX_FILE_BYTES)) {
+      setError("ファイルが大きすぎます(1つ500MBまで)。短く切り出してから入れてください。");
+      return null;
+    }
+    return list;
+  }, []);
+
+  const excerpt = useCallback(
+    (from: Source, start: number, length: number): AudioBuffer => {
       const ctx = audio();
       const rate = from.buffer.sampleRate;
       const first = Math.max(0, Math.min(from.buffer.length - 1, Math.floor(start * rate)));
-      const count = Math.max(1, Math.min(from.buffer.length - first, Math.floor(Math.min(length, MAX_VOICE_SEC) * rate)));
-      const excerpt = ctx.createBuffer(1, count, rate);
-      excerpt.getChannelData(0).set(from.buffer.getChannelData(0).subarray(first, first + count));
-      const whole = first === 0 && count === from.buffer.length;
-      adoptBuffer(excerpt, whole ? from.name : `${from.name}(${mmss(start)}から${Math.round(count / rate)}秒)`);
+      const count = Math.max(1, Math.min(from.buffer.length - first, Math.floor(length * rate)));
+      const out = ctx.createBuffer(from.buffer.numberOfChannels, count, rate);
+      for (let c = 0; c < out.numberOfChannels; c++) out.getChannelData(c).set(from.buffer.getChannelData(c).subarray(first, first + count));
+      return out;
     },
-    [adoptBuffer, audio],
+    [audio],
+  );
+
+  /** 元の素材のうち、指定した範囲だけを声ネタにする */
+  const applyRange = useCallback(
+    (from: Source, start: number, length: number) => {
+      const part = excerpt(from, start, Math.min(length, MAX_VOICE_SEC));
+      const whole = part.length === from.buffer.length;
+      setBeforeIsolation(null);
+      adoptBuffer(part, whole ? from.name : `${from.name}(${mmss(start)}から${Math.round(part.duration)}秒)`);
+    },
+    [adoptBuffer, excerpt],
   );
 
   const replaceSource = useCallback((next: Source | null) => {
@@ -159,49 +286,20 @@ export function Studio() {
     });
   }, []);
 
-  const loadFiles = useCallback(
+  const loadVoiceFiles = useCallback(
     async (files: FileList | null) => {
-      if (!files || files.length === 0) return;
+      const list = checkFiles(files);
+      if (!list) return;
       stop();
-      const list = Array.from(files).slice(0, 12);
-      if (list.some((file) => file.size > MAX_FILE_BYTES)) {
-        setError("ファイルが大きすぎます(1つ500MBまで)。動画を短く切り出してから入れてください。");
-        return;
-      }
       const hasVideo = list.some((file) => file.type.startsWith("video/"));
       setBusy(hasVideo ? "動画から音声を取り出しています…(長い動画は時間がかかります)" : "素材を読み込んでいます…");
       try {
-        const ctx = audio();
-        const decoded: AudioBuffer[] = [];
-        for (const file of list) decoded.push(await ctx.decodeAudioData(await file.arrayBuffer()));
-
-        // 音声だけをモノラルにして、複数の素材はすき間を空けて1本につなぐ
-        const gap = decoded.length > 1 ? Math.floor(ctx.sampleRate * 0.15) : 0;
-        const limit = Math.floor(ctx.sampleRate * MAX_SOURCE_SEC);
-        const total = Math.min(limit, decoded.reduce((sum, b) => sum + b.length + gap, 0) - gap);
-        const joined = ctx.createBuffer(1, Math.max(1, total), ctx.sampleRate);
-        const out = joined.getChannelData(0);
-        let offset = 0;
-        for (const buffer of decoded) {
-          for (let c = 0; c < buffer.numberOfChannels; c++) {
-            const data = buffer.getChannelData(c);
-            for (let i = 0; i < data.length && offset + i < total; i++) out[offset + i] += data[i] / buffer.numberOfChannels;
-          }
-          offset += buffer.length + gap;
-          if (offset >= total) break;
-        }
-
-        const single = list.length === 1 ? list[0] : null;
-        const next: Source = {
-          buffer: joined,
-          name: single ? single.name : `${list.length}個の素材`,
-          videoUrl: single && single.type.startsWith("video/") ? URL.createObjectURL(single) : null,
-        };
+        const next = await decodeFiles(list);
         replaceSource(next);
-        const length = Math.min(30, joined.duration);
+        const fits = next.buffer.duration <= MAX_VOICE_SEC;
         setRangeStart(0);
-        setRangeLength(joined.duration <= MAX_VOICE_SEC ? Math.ceil(joined.duration) : 30);
-        applyRange(next, 0, joined.duration <= MAX_VOICE_SEC ? joined.duration : length);
+        setRangeLength(fits ? Math.max(2, Math.ceil(next.buffer.duration)) : 30);
+        applyRange(next, 0, fits ? next.buffer.duration : 30);
       } catch {
         setError(
           hasVideo
@@ -212,7 +310,7 @@ export function Studio() {
         setBusy("");
       }
     },
-    [audio, replaceSource, stop, applyRange],
+    [applyRange, checkFiles, decodeFiles, replaceSource, stop],
   );
 
   const loadDemo = useCallback(() => {
@@ -223,6 +321,7 @@ export function Studio() {
       const buffer = ctx.createBuffer(1, samples.length, ctx.sampleRate);
       buffer.getChannelData(0).set(samples);
       replaceSource(null);
+      setBeforeIsolation(null);
       adoptBuffer(buffer, "お試し音声(合成)");
     } catch (e) {
       setError(e instanceof Error ? e.message : "音声を準備できませんでした。");
@@ -246,6 +345,7 @@ export function Studio() {
         try {
           const buffer = await audio().decodeAudioData(await new Blob(chunks).arrayBuffer());
           replaceSource(null);
+          setBeforeIsolation(null);
           adoptBuffer(buffer, "録音した声");
         } catch {
           setError("録音を読み込めませんでした。");
@@ -260,40 +360,151 @@ export function Studio() {
     }
   }, [adoptBuffer, audio, recording, replaceSource, stop]);
 
-  const loadMidi = useCallback(async (files: FileList | null) => {
-    const file = files?.[0];
-    if (!file) return;
+  /** いまの声ネタから、BGM や効果音を取り除いて声だけにする */
+  const isolateVoice = useCallback(async () => {
+    if (!voice) return;
+    stop();
+    const original = { buffer: voice.buffer, name: voice.name };
     try {
-      setMidiSong(parseMidi(new Uint8Array(await file.arrayBuffer()), file.name));
-      setBpm(null);
-      setError("");
-      setDownload(null);
+      setBusy("声を取り出す準備をしています…");
+      const input = await toModelInput(voice.buffer);
+      const result = await separate(input, setBusy);
+      if (vocalShare(result) < MIN_VOCAL_SHARE) {
+        setError("この場面からは人の声が見つかりませんでした。声の入っている場面を選んでください(元の音はそのまま残しています)。");
+        return;
+      }
+      const ok = adoptBuffer(toAudioBuffer(audio(), result.vocals), `${voice.name}(声のみ)`);
+      if (ok) setBeforeIsolation(original);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "MIDI を読み込めませんでした。");
+      setError(e instanceof Error ? e.message : "声の取り出しに失敗しました。");
+    } finally {
+      setBusy("");
     }
-  }, []);
+  }, [adoptBuffer, audio, stop, voice]);
 
-  const options = useMemo(() => ({ leadSlices: [] as number[], shots, voiceDrums, transpose }), [shots, voiceDrums, transpose]);
+  const restoreVoice = useCallback(() => {
+    if (!beforeIsolation) return;
+    stop();
+    adoptBuffer(beforeIsolation.buffer, beforeIsolation.name);
+    setBeforeIsolation(null);
+  }, [adoptBuffer, beforeIsolation, stop]);
+
+  const loadMidi = useCallback(
+    async (files: FileList | null) => {
+      const file = files?.[0];
+      if (!file) return;
+      stop();
+      try {
+        setCustom({ song: parseMidi(new Uint8Array(await file.arrayBuffer()), file.name) });
+        setSongMode("custom");
+        setBpm(null);
+        setError("");
+      } catch (e) {
+        setError(e instanceof Error ? e.message : "MIDI を読み込めませんでした。");
+      }
+    },
+    [stop],
+  );
+
+  const loadSongFiles = useCallback(
+    async (files: FileList | null) => {
+      const list = checkFiles(files);
+      if (!list) return;
+      stop();
+      setBusy("曲を読み込んでいます…");
+      try {
+        const next = await decodeFiles(list.slice(0, 1));
+        setSongSource((current) => {
+          if (current?.videoUrl) URL.revokeObjectURL(current.videoUrl);
+          return next;
+        });
+        setSongStart(0);
+        setSongLength(Math.max(2, Math.min(60, Math.floor(next.buffer.duration))));
+        setError("");
+      } catch {
+        setError("曲を読み込めませんでした。mp3・wav・m4a などの音声ファイルか、mp4 などの動画ファイルを選んでください。");
+      } finally {
+        setBusy("");
+      }
+    },
+    [checkFiles, decodeFiles, stop],
+  );
+
+  /** 選んだ曲を「歌声」と「伴奏」に分け、歌声からメロディを読み取る */
+  const analyzeSong = useCallback(async () => {
+    if (!songSource) return;
+    stop();
+    try {
+      setBusy("曲を解析する準備をしています…");
+      const length = Math.min(songLength, MAX_SONG_SEC, songSource.buffer.duration - songStart);
+      const input = await toModelInput(songSource.buffer, songStart, length);
+      const result = await separate(input, setBusy);
+      setBusy("歌声からメロディを読み取っています…");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      // 歌が入っていれば歌声から、入っていなければ(インスト曲など)伴奏の主旋律からメロディを読み取る
+      const hasVocals = vocalShare(result) >= MIN_VOCAL_SHARE;
+      const melody = extractMelody(toMono(hasVocals ? result.vocals : result.other), 44100);
+      if (melody.length < 4) {
+        setError("この場面からはメロディを読み取れませんでした。歌や主旋律がはっきりしている場面を選んでください。");
+        return;
+      }
+      const ctx = audio();
+      setCustom({
+        // 1拍=1秒として扱う(伴奏の音声に合わせるので、テンポは変えない)
+        song: {
+          bpm: 60,
+          beats: result.vocals.left.length / 44100,
+          melody,
+          bass: [],
+          chords: [],
+          drums: [],
+          shots: [],
+          label: `${songSource.name}・${melody.length}音`,
+        },
+        stems: {
+          music: toAudioBuffer(ctx, mixStems([result.bass, result.other])),
+          drums: toAudioBuffer(ctx, result.drums),
+        },
+        fromVocals: hasVocals,
+      });
+      setSongMode("custom");
+      setBpm(null);
+      setTranspose(0);
+      setError("");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "曲の解析に失敗しました。");
+    } finally {
+      setBusy("");
+    }
+  }, [audio, songLength, songSource, songStart, stop]);
+
+  const options = useMemo(
+    () => ({ leadSlices: [] as number[], shots: shots && !usingCustom, voiceDrums: voiceDrums && !stems, transpose: stems ? 0 : transpose }),
+    [shots, voiceDrums, transpose, usingCustom, stems],
+  );
+
+  const ready = voice !== null && active.slices.length > 0 && !busy;
 
   const play = useCallback(() => {
     if (!voice || active.slices.length === 0) return;
     stop();
     const ctx = audio();
     const events = arrange(song, active.slices, options);
-    stopRef.current = schedule(ctx, song, voice.buffer, active.slices, events, mix, ctx.currentTime + 0.08);
+    stopRef.current = schedule(ctx, song, voice.buffer, active.slices, events, mix, ctx.currentTime + 0.08, stems);
     setPlaying(true);
     endTimer.current = window.setTimeout(() => stop(), songSeconds(song) * 1000 + 200);
-  }, [active, audio, mix, options, song, stop, voice]);
+  }, [active, audio, mix, options, song, stems, stop, voice]);
 
   const audition = useCallback(
     (index: number) => {
       if (!voice) return;
       const ctx = audio();
       const slice = voice.slices[index];
-      const source = ctx.createBufferSource();
-      source.buffer = voice.buffer;
-      source.connect(ctx.destination);
-      source.start(ctx.currentTime, slice.start, slice.end - slice.start);
+      const node = ctx.createBufferSource();
+      node.buffer = voice.buffer;
+      node.connect(ctx.destination);
+      node.start(ctx.currentTime, slice.start, slice.end - slice.start);
     },
     [audio, voice],
   );
@@ -304,25 +515,27 @@ export function Studio() {
     try {
       const rate = 44100;
       const offline = new OfflineAudioContext(2, Math.ceil(songSeconds(song) * rate), rate);
-      schedule(offline, song, voice.buffer, active.slices, arrange(song, active.slices, options), mix, 0);
+      schedule(offline, song, voice.buffer, active.slices, arrange(song, active.slices, options), mix, 0, stems);
       const rendered = await offline.startRendering();
       const wav = encodeWav([rendered.getChannelData(0), rendered.getChannelData(1)], rate);
-      if (download) URL.revokeObjectURL(download.url);
-      setDownload({ url: URL.createObjectURL(new Blob([wav], { type: "audio/wav" })), name: `otomad-${seed}.wav` });
+      setDownload((current) => {
+        if (current) URL.revokeObjectURL(current.url);
+        return { url: URL.createObjectURL(new Blob([wav], { type: "audio/wav" })), name: `otomad-${usingCustom ? "custom" : seed}.wav` };
+      });
     } catch {
       setError("書き出しに失敗しました。");
     } finally {
       setBusy("");
     }
-  }, [active, download, mix, options, seed, song, voice]);
+  }, [active, mix, options, seed, song, stems, usingCustom, voice]);
 
-  // 設定を変えたら、前に書き出したファイルは古くなるので消す
+  // 設定や素材を変えたら、前に書き出したファイルは古くなるので消す
   useEffect(() => {
     setDownload((current) => {
       if (current) URL.revokeObjectURL(current.url);
       return null;
     });
-  }, [song, options, mix, enabled]);
+  }, [song, options, mix, enabled, voice, stems]);
 
   const seconds = Math.round(songSeconds(song));
 
@@ -340,6 +553,11 @@ export function Studio() {
           {error}
         </p>
       )}
+      {busy && (
+        <p className="notice ok" role="status">
+          {busy}
+        </p>
+      )}
 
       <section className="card">
         <div className="card-head">
@@ -349,61 +567,34 @@ export function Studio() {
         <div className="otomad-buttons">
           <label className="btn primary">
             音声・動画ファイルを選ぶ
-            <input className="visually-hidden" type="file" accept="audio/*,video/*" multiple onChange={(e) => void loadFiles(e.target.files)} />
+            <input className="visually-hidden" type="file" accept="audio/*,video/*" multiple disabled={Boolean(busy)} onChange={(e) => void loadVoiceFiles(e.target.files)} />
           </label>
-          <button className={recording ? "btn danger" : "btn"} type="button" onClick={() => void toggleRecording()}>
+          <button className={recording ? "btn danger" : "btn"} type="button" onClick={() => void toggleRecording()} disabled={Boolean(busy)}>
             {recording ? "■ 録音を止める" : "マイクで録音"}
           </button>
-          <button className="btn" type="button" onClick={loadDemo}>
+          <button className="btn" type="button" onClick={loadDemo} disabled={Boolean(busy)}>
             お試し音声で試す
           </button>
         </div>
-        {busy && <p className="sub" style={{ marginTop: 8 }}>{busy}</p>}
 
         {source && (source.videoUrl || source.buffer.duration > MAX_VOICE_SEC) && (
-          <div className="otomad-range">
-            {source.videoUrl && (
-              // eslint-disable-next-line jsx-a11y/media-has-caption
-              <video ref={videoRef} src={source.videoUrl} controls playsInline preload="metadata" />
-            )}
-            <p className="sub">
-              {source.name}・音声 {mmss(source.buffer.duration)}
-              {source.buffer.duration >= MAX_SOURCE_SEC - 1 ? "(先頭10分まで読み込みました)" : ""}。使いたい場面を選んでください(一度に{MAX_VOICE_SEC}秒まで)。
-            </p>
-            <div className="sliders">
-              <label>
-                <span>開始 {mmss(rangeStart)}</span>
-                <input
-                  type="range"
-                  min={0}
-                  max={Math.max(0, Math.floor(source.buffer.duration - 1))}
-                  step={0.5}
-                  value={rangeStart}
-                  onChange={(e) => setRangeStart(Number(e.target.value))}
-                />
-              </label>
-              <label>
-                <span>長さ {rangeLength}秒</span>
-                <input type="range" min={2} max={MAX_VOICE_SEC} step={1} value={rangeLength} onChange={(e) => setRangeLength(Number(e.target.value))} />
-              </label>
-            </div>
-            <div className="otomad-buttons" style={{ marginTop: 8 }}>
-              {source.videoUrl && (
-                <button className="btn" type="button" onClick={() => setRangeStart(Math.floor((videoRef.current?.currentTime ?? 0) * 2) / 2)}>
-                  動画の再生位置を開始にする
-                </button>
-              )}
-              <button className="btn primary" type="button" onClick={() => applyRange(source, rangeStart, rangeLength)}>
-                この範囲を声ネタにする
-              </button>
-            </div>
-          </div>
+          <RangePicker
+            source={source}
+            start={rangeStart}
+            length={rangeLength}
+            maxLength={MAX_VOICE_SEC}
+            actionLabel="この範囲を声ネタにする"
+            disabled={Boolean(busy)}
+            onStart={setRangeStart}
+            onLength={setRangeLength}
+            onApply={() => applyRange(source, rangeStart, rangeLength)}
+          />
         )}
 
         {voice && (
           <>
             <canvas ref={canvasRef} className="otomad-wave" aria-label="声ネタの波形と、切り分けた区間" />
-            <p className="sub">
+            <p className="sub" data-testid="voice-info">
               {voice.name}・{voice.slices.length}個に切り分けました。押すと試聴、「×」でその音を使わないようにできます。ピンクはメロディ担当です。
             </p>
             <div className="slice-list">
@@ -425,6 +616,20 @@ export function Studio() {
                 </span>
               ))}
             </div>
+            <div className="otomad-buttons" style={{ marginTop: 10 }}>
+              {beforeIsolation ? (
+                <button className="btn" type="button" onClick={restoreVoice} disabled={Boolean(busy)}>
+                  分ける前の音に戻す
+                </button>
+              ) : (
+                <button className="btn" type="button" onClick={() => void isolateVoice()} disabled={Boolean(busy)}>
+                  BGM を消して声だけにする(AI)
+                </button>
+              )}
+            </div>
+            <p className="sub" style={{ marginTop: 6 }}>
+              AI の処理はこの端末の中で行います。初回だけ約180MBのモデルをダウンロードし、処理には素材の長さと同じくらいかそれ以上の時間がかかります。パソコンでの利用をおすすめします。
+            </p>
           </>
         )}
       </section>
@@ -432,65 +637,125 @@ export function Studio() {
       <section className="card">
         <div className="card-head">
           <h2>2. 曲を決める</h2>
-          <span className="code">{song.label}</span>
+          <span className="code" data-testid="song-label">
+            {song.label}
+          </span>
         </div>
-        <div className="filters">
-          <div className="filter-row">
-            <span className="code">曲調</span>
-            <div className="chips" style={{ margin: 0, padding: "1px 0" }}>
-              {STYLES.map((s) => (
-                <button
-                  key={s.value}
-                  type="button"
-                  className="chip"
-                  aria-pressed={!midiSong && style === s.value}
-                  onClick={() => {
-                    setMidiSong(null);
-                    setStyle(s.value);
-                    setBpm(null);
-                  }}
-                >
-                  {s.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-        <div className="otomad-buttons" style={{ marginTop: 8 }}>
+        <div className="chips major" style={{ margin: "0 0 10px", padding: "1px 0" }}>
           <button
-            className="btn primary"
             type="button"
+            className="chip"
+            aria-pressed={songMode === "auto"}
             onClick={() => {
-              setMidiSong(null);
-              setSeed((value) => value + 1);
+              stop();
+              setSongMode("auto");
+              setBpm(null);
             }}
           >
-            別の曲にする
+            おまかせで作る
           </button>
-          <label className="btn">
-            MIDI を読み込む
-            <input className="visually-hidden" type="file" accept=".mid,.midi,audio/midi" onChange={(e) => void loadMidi(e.target.files)} />
-          </label>
+          <button
+            type="button"
+            className="chip"
+            aria-pressed={songMode === "custom"}
+            onClick={() => {
+              stop();
+              setSongMode("custom");
+              setBpm(null);
+            }}
+          >
+            好きな曲を使う
+          </button>
         </div>
+
+        {songMode === "auto" ? (
+          <>
+            <div className="filter-row">
+              <span className="code">曲調</span>
+              <div className="chips" style={{ margin: 0, padding: "1px 0" }}>
+                {STYLES.map((s) => (
+                  <button
+                    key={s.value}
+                    type="button"
+                    className="chip"
+                    aria-pressed={style === s.value}
+                    onClick={() => {
+                      setStyle(s.value);
+                      setBpm(null);
+                    }}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="otomad-buttons" style={{ marginTop: 8 }}>
+              <button className="btn primary" type="button" onClick={() => setSeed((value) => value + 1)}>
+                別の曲にする
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="otomad-buttons">
+              <label className="btn primary">
+                曲のファイルを選ぶ(音声・動画)
+                <input className="visually-hidden" data-testid="song-file" type="file" accept="audio/*,video/*" disabled={Boolean(busy)} onChange={(e) => void loadSongFiles(e.target.files)} />
+              </label>
+              <label className="btn">
+                MIDI を読み込む
+                <input className="visually-hidden" type="file" accept=".mid,.midi,audio/midi" disabled={Boolean(busy)} onChange={(e) => void loadMidi(e.target.files)} />
+              </label>
+            </div>
+            {songSource && (
+              <RangePicker
+                source={songSource}
+                start={songStart}
+                length={songLength}
+                maxLength={MAX_SONG_SEC}
+                actionLabel="この範囲で曲を解析する(AI)"
+                disabled={Boolean(busy)}
+                onStart={setSongStart}
+                onLength={setSongLength}
+                onApply={() => void analyzeSong()}
+              />
+            )}
+            <p className="sub" style={{ marginTop: 8 }}>
+              {custom
+                ? custom.stems
+                  ? custom.fromVocals
+                    ? "曲の歌声を抜いた伴奏に合わせて、読み取ったメロディを声ネタが歌います。"
+                    : "この曲からは歌声が見つからなかったので、伴奏の主旋律を読み取って声ネタに歌わせます(元の主旋律も伴奏に残ります)。"
+                  : "MIDI のメロディを声ネタが歌い、伴奏は MIDI の内容を合成音で鳴らします。"
+                : "曲のファイルを選ぶと、AI が歌声と伴奏に分け、歌声のメロディを声ネタに歌わせます。歌の入った場面を選んでください。まだ曲を選んでいないあいだは、おまかせの曲が鳴ります。"}
+            </p>
+          </>
+        )}
+
         <div className="sliders">
           <label>
-            <span>テンポ {Math.round(song.bpm)}</span>
-            <input type="range" min={70} max={190} step={1} value={Math.round(song.bpm)} onChange={(e) => setBpm(Number(e.target.value))} />
+            <span>テンポ {stems ? "曲のまま" : Math.round(song.bpm)}</span>
+            <input
+              type="range"
+              min={70}
+              max={190}
+              step={1}
+              value={Math.round(Math.max(70, Math.min(190, song.bpm)))}
+              disabled={Boolean(stems)}
+              onChange={(e) => setBpm(Number(e.target.value))}
+            />
           </label>
           <label>
-            <span>
-              キー {transpose > 0 ? "+" : ""}
-              {transpose}
-            </span>
-            <input type="range" min={-6} max={6} step={1} value={transpose} onChange={(e) => setTranspose(Number(e.target.value))} />
+            <span>キー {stems ? "曲のまま" : `${transpose > 0 ? "+" : ""}${transpose}`}</span>
+            <input type="range" min={-6} max={6} step={1} value={stems ? 0 : transpose} disabled={Boolean(stems)} onChange={(e) => setTranspose(Number(e.target.value))} />
           </label>
         </div>
         <div className="otomad-toggles">
           <label>
-            <input type="checkbox" checked={shots} onChange={(e) => setShots(e.target.checked)} disabled={Boolean(midiSong)} /> 連打の合いの手
+            <input type="checkbox" checked={shots && !usingCustom} onChange={(e) => setShots(e.target.checked)} disabled={usingCustom} /> 連打の合いの手
           </label>
           <label>
-            <input type="checkbox" checked={voiceDrums} onChange={(e) => setVoiceDrums(e.target.checked)} /> 声でドラム
+            <input type="checkbox" checked={voiceDrums && !stems} onChange={(e) => setVoiceDrums(e.target.checked)} disabled={Boolean(stems)} /> 声でドラム
           </label>
         </div>
       </section>
@@ -517,10 +782,10 @@ export function Studio() {
           ))}
         </div>
         <div className="otomad-buttons" style={{ marginTop: 10 }}>
-          <button className="btn primary" type="button" onClick={playing ? stop : play} disabled={!voice || active.slices.length === 0}>
+          <button className="btn primary" type="button" onClick={playing ? stop : play} disabled={!ready && !playing}>
             {playing ? "■ 止める" : "▶ 再生"}
           </button>
-          <button className="btn" type="button" onClick={() => void exportWav()} disabled={!voice || active.slices.length === 0 || Boolean(busy)}>
+          <button className="btn" type="button" onClick={() => void exportWav()} disabled={!ready}>
             WAV に書き出す
           </button>
           {download && (
@@ -533,7 +798,7 @@ export function Studio() {
       </section>
 
       <p className="sub" style={{ lineHeight: 1.7 }}>
-        音声はこの端末の中だけで処理し、どこにも送信しません。曲は毎回その場で自動生成するオリジナルです。他人の映像・音声・楽曲を素材にしたものを公開すると、権利者から削除や収益化の停止を求められることがあります。
+        音声と動画はこの端末の中だけで処理し、どこにも送信しません。他人の映像・音声・楽曲を素材にしたものを公開すると、権利者から削除や収益化の停止を求められることがあります。
       </p>
     </main>
   );

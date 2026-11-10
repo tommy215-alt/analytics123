@@ -3,13 +3,15 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "node scripts/copy-ort.mjs && next dev",
+    "build": "node scripts/copy-ort.mjs && next build",
     "start": "next start",
     "test": "node --test --experimental-strip-types tests/*.test.ts"
   },
   "dependencies": {
+    "demucs-web": "1.0.2",
     "next": "^16.4.6",
+    "onnxruntime-web": "1.31.1",
     "react": "^19.3.1",
     "react-dom": "^19.3.1"
   },

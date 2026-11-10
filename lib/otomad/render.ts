@@ -13,6 +13,9 @@ export type Mix = {
   drums: number;
 };
 
+/** 好きな曲を使うときの伴奏(歌声を抜いた音)。ドラムだけ別にしてあるので音量を個別に変えられる */
+export type BackingStems = { music: AudioBuffer; drums: AudioBuffer };
+
 export const TAIL_SEC = 1.2;
 
 export function songSeconds(song: Song): number {
@@ -39,6 +42,7 @@ export function schedule(
   events: VoiceEvent[],
   mix: Mix,
   start: number,
+  stems?: BackingStems,
 ): () => void {
   const sources: AudioScheduledSourceNode[] = [];
   const master = ctx.createGain();
@@ -62,6 +66,21 @@ export function schedule(
   const drumBus = bus(mix.drums);
   const secPerBeat = 60 / song.bpm;
   const noise = noiseBuffer(ctx);
+
+  // ---- 好きな曲の伴奏(あれば) ----
+  if (stems) {
+    const play = (buffer: AudioBuffer, level: number) => {
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      const gain = ctx.createGain();
+      gain.gain.value = level;
+      source.connect(gain).connect(master);
+      source.start(start);
+      sources.push(source);
+    };
+    play(stems.music, mix.backing * 1.1);
+    play(stems.drums, mix.drums * 1.1);
+  }
 
   // ---- 声ネタ ----
   for (const event of events) {
