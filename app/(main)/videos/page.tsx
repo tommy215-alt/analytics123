@@ -44,13 +44,19 @@ export default async function VideosPage({ searchParams }: { searchParams: Promi
       <div className="page-title">
         <div>
           <h1>動画</h1>
-          <span className="sub">新しい順に最大100本・ショートは3分以下で推定</span>
+          <span className="sub">直近100本・ショートは3分以下で推定</span>
         </div>
       </div>
 
       <div className="filters">
-        <Chips current={kind} items={KINDS.map((k) => ({ ...k, href: href({ kind: k.value }) }))} />
-        <Chips current={sort} items={SORTS.map((s) => ({ ...s, href: href({ sort: s.value }) }))} />
+        <div className="filter-row">
+          <span className="code">形式</span>
+          <Chips variant="alt" current={kind} items={KINDS.map((k) => ({ ...k, href: href({ kind: k.value }) }))} />
+        </div>
+        <div className="filter-row">
+          <span className="code">並び</span>
+          <Chips current={sort} items={SORTS.map((s) => ({ ...s, href: href({ sort: s.value }) }))} />
+        </div>
       </div>
 
       <InsightsCard insights={analyzeVideos(videos)} title="自分の動画の傾向" />
@@ -59,7 +65,7 @@ export default async function VideosPage({ searchParams }: { searchParams: Promi
         {videos.length === 0 ? (
           <p className="empty">該当する動画がありません。</p>
         ) : (
-          <ul className="videos">
+          <ul className="videos wide">
             {videos.map((video) => (
               <VideoItem key={video.id} video={video} />
             ))}

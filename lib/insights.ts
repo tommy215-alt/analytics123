@@ -117,8 +117,8 @@ export function analyzeVideos(videos: Video[], now = Date.now()): TrendInsights 
     titlePatterns: [
       { label: "【】で強調", share: share((t) => /【.+?】/.test(t)) },
       { label: "数字入り", share: share((t) => /[\d０-９]/.test(t)) },
-      { label: "！や？で終わる・含む", share: share((t) => /[!?！？]/.test(t)) },
-      { label: "#ハッシュタグ入り", share: share((t) => /#[^\s#]+/.test(t)) },
+      { label: "！？入り", share: share((t) => /[!?！？]/.test(t)) },
+      { label: "#タグ入り", share: share((t) => /#[^\s#]+/.test(t)) },
     ],
     words: topCounts(videos.flatMap((v) => titleWords(v.title)), 12),
     tags: topCounts(videos.flatMap((v) => [...new Set(v.tags.map((t) => t.toLowerCase()))]), 12),

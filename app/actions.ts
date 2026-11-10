@@ -71,7 +71,7 @@ export async function addRef(_prev: string | null, form: FormData): Promise<stri
   if (refs.some((r) => r.channelId === found.channelId)) return "すでに追加されています。";
 
   await saveRefs([...refs, found]);
-  redirect(`/trends?mode=refs&ref=${found.channelId}`);
+  redirect(`/trends?mode=refs&fmt=long&ref=${found.channelId}`);
 }
 
 export async function removeRef(form: FormData): Promise<void> {

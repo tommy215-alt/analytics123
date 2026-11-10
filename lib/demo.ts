@@ -112,6 +112,60 @@ const TOPICS: Record<string, { long: string[]; short: string[]; tags: string[] }
     ],
     tags: ["検証", "レビュー", "ルーティン", "雑学", "裏ワザ", "vlog", "日常"],
   },
+  global: {
+    long: [
+      "I Spent 50 Hours Building a Tiny House",
+      "Why Everyone Is Quitting This Job (Explained)",
+      "We Tried Every Street Food in One Night",
+      "The Truth About Cheap Flights in 2026",
+      "How This 19-Year-Old Built a $1M Business",
+      "Top 10 Gadgets You Actually Need",
+      "24 Hours in the World's Smallest Hotel",
+    ],
+    short: [
+      "Wait for it… #shorts",
+      "He did NOT expect that!",
+      "This trick saves you 10 minutes #lifehack",
+      "POV: your dog learns a new word",
+      "3 mistakes every beginner makes",
+      "Is this the best goal of 2026?",
+    ],
+    tags: ["challenge", "vlog", "explained", "lifehack", "review", "funny"],
+  },
+  ai_ja: {
+    long: [
+      "【生成AI】全編AIで短編アニメを作ってみた",
+      "AIだけで1曲作ってMVまで完成させる方法",
+      "【検証】AI動画はどこまで実写に近づいたのか?",
+      "初心者向け|AI動画生成ツール5つを比較",
+      "AIで作る解説動画の作り方を全部見せます",
+    ],
+    short: [
+      "AIが描いた100年後の東京 #AI",
+      "この猫、実は全部AI生成です",
+      "AIに昭和のCMを作らせた結果!",
+      "AI生成で歴史上の人物が自撮りしたら",
+      "1枚の写真からAIで動画を作る #shorts",
+    ],
+    tags: ["AI", "生成AI", "AI動画", "AIアニメ", "Sora", "Suno"],
+  },
+  ai_en: {
+    long: [
+      "I Made a Short Film Using Only AI",
+      "AI Video Generators Ranked: 2026 Edition",
+      "Can AI Write a Hit Song? Full Experiment",
+      "How I Make Faceless AI Videos (Full Workflow)",
+      "This AI Animation Took Me 3 Hours",
+    ],
+    short: [
+      "AI imagines cities in the year 3000 #ai",
+      "This cat is 100% AI generated",
+      "AI recreates famous paintings as selfies",
+      "If history had smartphones (AI) #shorts",
+      "One photo → AI video in 10 seconds",
+    ],
+    tags: ["AI", "ai generated", "ai video", "ai animation", "Sora", "Midjourney"],
+  },
 };
 
 function topicFor(channelId: string): keyof typeof TOPICS {
@@ -120,12 +174,14 @@ function topicFor(channelId: string): keyof typeof TOPICS {
   return "general";
 }
 
-function makeVideos(seedKey: string, topic: keyof typeof TOPICS, count: number, opts: { maxAgeDays: number; scale: number; channelTitle?: string; channelId?: string }, now: number): Video[] {
+function makeVideos(seedKey: string, topic: keyof typeof TOPICS, count: number, opts: { maxAgeDays: number; scale: number; channelTitle?: string; channelId?: string; kind?: "long" | "short" }, now: number): Video[] {
   const rand = rng(hash(seedKey));
   const t = TOPICS[topic];
+  const ai = topic === "ai_ja" || topic === "ai_en";
   const videos: Video[] = [];
   for (let i = 0; i < count; i++) {
-    const short = rand() < 0.45;
+    const roll = rand();
+    const short = opts.kind ? opts.kind === "short" : roll < 0.45;
     const pool = short ? t.short : t.long;
     const title = pool[Math.floor(rand() * pool.length)];
     const ageHours = 3 + rand() * opts.maxAgeDays * 24;
@@ -147,6 +203,8 @@ function makeVideos(seedKey: string, topic: keyof typeof TOPICS, count: number, 
       comments: Math.round(views * (0.001 + rand() * 0.003)),
       tags: t.tags.filter(() => rand() < 0.45),
       isLive: false,
+      aiRelated: ai,
+      synthetic: ai && rand() < 0.5,
     });
   }
   return videos;
@@ -194,6 +252,8 @@ export function demoDaily(account: AccountInfo, range: DateRange): DailyPoint[] 
       minutes: Math.round(views * (2.1 + rand() * 0.6)),
       subsGained: Math.round(views / 260 + rand() * 6),
       subsLost: Math.round(views / 1500 + rand() * 3),
+      likes: Math.round(views * (0.028 + rand() * 0.012)),
+      avgViewDurationSec: 130 + rand() * 30,
     });
   }
   return points;
@@ -210,7 +270,7 @@ export function demoTotals(account: AccountInfo, range: DateRange): Totals {
     avgViewDurationSec: views === 0 ? 0 : (minutes * 60) / views,
     subsGained: sum((p) => p.subsGained),
     subsLost: sum((p) => p.subsLost),
-    likes: Math.round(views * 0.034),
+    likes: sum((p) => p.likes),
     comments: Math.round(views * 0.002),
     shares: Math.round(views * 0.004),
   };
@@ -240,10 +300,10 @@ export function demoTraffic(account: AccountInfo, range: DateRange): NamedValue[
   const total = demoTotals(account, range).views;
   const parts: [string, string, number][] = [
     ["SHORTS", "ショートフィード", 0.34],
-    ["SUBSCRIBER", "ブラウジング機能(ホーム・登録チャンネル)", 0.24],
+    ["SUBSCRIBER", "ブラウジング(ホーム等)", 0.24],
     ["RELATED_VIDEO", "関連動画", 0.17],
     ["YT_SEARCH", "YouTube 検索", 0.13],
-    ["EXT_URL", "外部サイト・アプリ", 0.05],
+    ["EXT_URL", "外部サイト", 0.05],
     ["YT_CHANNEL", "チャンネルページ", 0.04],
     ["NOTIFICATION", "通知", 0.03],
   ];
@@ -282,13 +342,40 @@ export function demoRevenue(account: AccountInfo, range: DateRange): number {
   return Math.round(demoTotals(account, range).views * 0.21);
 }
 
-/** 急上昇・検索・参考チャンネル用のサンプル動画 */
-export function demoTrendVideos(key: string, options: { days: number; length: "any" | "short" | "medium" | "long" }, now = Date.now()): Video[] {
-  const videos = makeVideos(`trend:${key}`, "general", 40, { maxAgeDays: options.days, scale: 260000 }, now);
-  const keep = videos.filter((v) =>
-    options.length === "any" ? true : options.length === "short" ? v.durationSec < 240 : v.durationSec >= 240,
+export function demoCountries(account: AccountInfo, range: DateRange): NamedValue[] {
+  const total = demoTotals(account, range).views;
+  const parts: [string, string, number][] = [
+    ["JP", "日本", 0.86],
+    ["US", "アメリカ合衆国", 0.05],
+    ["TW", "台湾", 0.03],
+    ["KR", "韓国", 0.02],
+    ["TH", "タイ", 0.01],
+  ];
+  return parts.map(([key, label, share]) => ({ key, label, value: Math.round(total * share) }));
+}
+
+export function demoDevices(account: AccountInfo, range: DateRange): NamedValue[] {
+  const total = demoTotals(account, range).views;
+  const parts: [string, string, number][] = [
+    ["MOBILE", "スマホ", 0.68],
+    ["TV", "テレビ", 0.15],
+    ["DESKTOP", "パソコン", 0.11],
+    ["TABLET", "タブレット", 0.06],
+  ];
+  return parts.map(([key, label, share]) => ({ key, label, value: Math.round(total * share) }));
+}
+
+/** 急上昇・AI系・検索用のサンプル動画 */
+export function demoTrendVideos(
+  key: string,
+  options: { days: number; kind: "long" | "short"; region: string; ai?: boolean },
+  now = Date.now(),
+): Video[] {
+  const japan = options.region === "JP";
+  const topic = options.ai ? (japan ? "ai_ja" : "ai_en") : japan ? "general" : "global";
+  return makeVideos(`trend:${key}:${options.region}:${options.kind}`, topic, 30, { maxAgeDays: options.days, scale: 260000, kind: options.kind }, now).sort(
+    (a, b) => b.views - a.views,
   );
-  return keep.sort((a, b) => b.views - a.views);
 }
 
 export function demoRefUploads(ref: RefChannel, now = Date.now()): Video[] {

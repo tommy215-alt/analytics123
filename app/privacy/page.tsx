@@ -8,7 +8,7 @@ export default function PrivacyPage() {
       <div className="page-title">
         <h1>プライバシーポリシー</h1>
       </div>
-      <section className="card" style={{ display: "grid", gap: 14 }}>
+      <section className="card prose">
         <p>Channel Deck は、運営者本人が自分の YouTube チャンネルの分析を見るための個人用ツールです。</p>
         <div>
           <h2>取得する情報</h2>

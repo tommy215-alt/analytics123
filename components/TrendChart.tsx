@@ -10,8 +10,8 @@ export type ChartMetric = {
   values: number[];
 };
 
-const HEIGHT = 200;
-const M = { top: 12, right: 12, bottom: 24, left: 44 };
+const HEIGHT = 168;
+const M = { top: 10, right: 8, bottom: 20, left: 40 };
 
 /** 0 を含む、切りのよい目盛り */
 function niceTicks(min: number, max: number, target = 4): number[] {
@@ -68,7 +68,7 @@ export function TrendChart({ dates, metrics }: { dates: string[]; metrics: Chart
 
   return (
     <div>
-      <div className="chips" role="group" aria-label="グラフに表示する指標" style={{ marginBottom: 12 }}>
+      <div className="chips" role="group" aria-label="グラフに表示する指標" style={{ marginBottom: 8 }}>
         {metrics.map((m) => (
           <button key={m.key} type="button" className="chip" aria-pressed={m.key === metric.key} onClick={() => setMetricKey(m.key)}>
             {m.label}
@@ -100,8 +100,8 @@ export function TrendChart({ dates, metrics }: { dates: string[]; metrics: Chart
                   {shortDay(dates[i])}
                 </text>
               ))}
-              <path d={geometry.area} fill="var(--series-1)" opacity="0.1" />
-              <path d={geometry.line} fill="none" stroke="var(--series-1)" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
+              <path d={geometry.area} fill="var(--series-1)" opacity="0.12" />
+              <path className="line" d={geometry.line} fill="none" stroke="var(--series-1)" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
               {hover !== null && (
                 <>
                   <line x1={geometry.x(hover)} x2={geometry.x(hover)} y1={M.top} y2={HEIGHT - M.bottom} stroke="var(--axis)" strokeWidth="1" />

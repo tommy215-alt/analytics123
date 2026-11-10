@@ -35,6 +35,9 @@ export default async function MainLayout({ children }: { children: React.ReactNo
     <div className="shell">
       <header className="topbar">
         <ChannelSwitcher accounts={ctx.accounts} activeId={ctx.active?.channelId} />
+        <span className="brand" aria-hidden="true">
+          CHANNEL DECK
+        </span>
         <Nav className="sidenav" />
       </header>
       <main className="content">

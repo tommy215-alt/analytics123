@@ -45,7 +45,7 @@ export async function getTotals(account: Account, range: DateRange): Promise<Tot
 export async function getDaily(account: Account, range: DateRange): Promise<DailyPoint[]> {
   const rows = await report(account, range, {
     dimensions: "day",
-    metrics: "views,estimatedMinutesWatched,subscribersGained,subscribersLost",
+    metrics: "views,estimatedMinutesWatched,averageViewDuration,subscribersGained,subscribersLost,likes",
     sort: "day",
   });
   return rows.map((r) => ({
@@ -54,6 +54,8 @@ export async function getDaily(account: Account, range: DateRange): Promise<Dail
     minutes: n(r.estimatedMinutesWatched),
     subsGained: n(r.subscribersGained),
     subsLost: n(r.subscribersLost),
+    likes: n(r.likes),
+    avgViewDurationSec: n(r.averageViewDuration),
   }));
 }
 
@@ -79,18 +81,18 @@ const TRAFFIC_LABELS: Record<string, string> = {
   ANNOTATION: "カード・アノテーション",
   CAMPAIGN_CARD: "キャンペーンカード",
   END_SCREEN: "終了画面",
-  EXT_URL: "外部サイト・アプリ",
+  EXT_URL: "外部サイト",
   HASHTAGS: "ハッシュタグ",
   LIVE_REDIRECT: "ライブリダイレクト",
   NO_LINK_EMBEDDED: "埋め込み(参照元不明)",
-  NO_LINK_OTHER: "直接アクセス・不明",
+  NO_LINK_OTHER: "直接・不明",
   NOTIFICATION: "通知",
   PLAYLIST: "再生リスト",
   PROMOTED: "プロモーション",
   RELATED_VIDEO: "関連動画",
   SHORTS: "ショートフィード",
   SOUND_PAGE: "サウンドページ",
-  SUBSCRIBER: "ブラウジング機能(ホーム・登録チャンネル)",
+  SUBSCRIBER: "ブラウジング(ホーム等)",
   VIDEO_REMIXES: "リミックス",
   YT_CHANNEL: "チャンネルページ",
   YT_OTHER_PAGE: "その他の YouTube 機能",
@@ -163,6 +165,51 @@ export async function getDemographics(account: Account, range: DateRange): Promi
       .map(([key, value]) => ({ key, label: GENDER_LABELS[key] ?? key, value }))
       .sort((a, b) => b.value - a.value),
   };
+}
+
+const regionNames = new Intl.DisplayNames(["ja"], { type: "region" });
+
+function countryLabel(code: string): string {
+  try {
+    return regionNames.of(code) ?? code;
+  } catch {
+    return code;
+  }
+}
+
+/** 視聴回数の多い国 */
+export async function getCountries(account: Account, range: DateRange, max = 6): Promise<NamedValue[]> {
+  const rows = await report(account, range, {
+    dimensions: "country",
+    metrics: "views",
+    sort: "-views",
+    maxResults: String(max),
+  });
+  return rows.map((r) => ({ key: String(r.country), label: countryLabel(String(r.country)), value: n(r.views) })).filter((r) => r.value > 0);
+}
+
+const DEVICE_LABELS: Record<string, string> = {
+  MOBILE: "スマホ",
+  DESKTOP: "パソコン",
+  TABLET: "タブレット",
+  TV: "テレビ",
+  GAME_CONSOLE: "ゲーム機",
+  UNKNOWN_PLATFORM: "不明",
+};
+
+/** 視聴に使われた機器 */
+export async function getDevices(account: Account, range: DateRange): Promise<NamedValue[]> {
+  const rows = await report(account, range, {
+    dimensions: "deviceType",
+    metrics: "views",
+    sort: "-views",
+  });
+  return rows
+    .map((r) => {
+      const key = String(r.deviceType);
+      return { key, label: DEVICE_LABELS[key] ?? key, value: n(r.views) };
+    })
+    .filter((r) => r.value > 0);
 }
 
 /** 推定収益(円)。収益化していないチャンネルでは取得できずエラーになる。 */

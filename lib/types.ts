@@ -31,6 +31,10 @@ export type Video = {
   tags: string[];
   categoryId?: string;
   isLive?: boolean;
+  /** タイトル・タグ・説明文に AI 関連の語がある(キーワードによる推定) */
+  aiRelated?: boolean;
+  /** 投稿者が「改変・合成コンテンツ」と申告している(API が返した場合のみ) */
+  synthetic?: boolean;
 };
 
 export type ChannelSummary = {
@@ -49,6 +53,8 @@ export type DailyPoint = {
   minutes: number;
   subsGained: number;
   subsLost: number;
+  likes: number;
+  avgViewDurationSec: number;
 };
 
 export type Totals = {

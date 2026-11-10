@@ -3,6 +3,7 @@ import { googleGet } from "./google.ts";
 import type { Account, ChannelSummary, RefChannel, Video } from "./types.ts";
 
 const API = "https://www.googleapis.com/youtube/v3";
+const VIDEO_PARTS = "snippet,statistics,contentDetails,liveStreamingDetails,status";
 
 const MIN = 60;
 const TTL = {
@@ -31,13 +32,23 @@ type VideoItem = {
     tags?: string[];
     categoryId?: string;
     liveBroadcastContent?: string;
+    description?: string;
   };
+  status?: { containsSyntheticMedia?: boolean };
   statistics?: { viewCount?: string; likeCount?: string; commentCount?: string };
   contentDetails?: { duration?: string };
   liveStreamingDetails?: unknown;
 };
 
 const toNumber = (v: string | undefined): number | null => (v === undefined ? null : Number(v));
+
+/** AI で作られた・AI を題材にした動画に付きやすい語(タイトル・タグ・説明文から探す) */
+const AI_PATTERN =
+  /(\bAI\b|ＡＩ|人工知能|\bSora\b|\bVeo\s?\d?\b|\bSuno\b|Midjourney|Runway|Stable\s?Diffusion|ChatGPT|\bKling\b|generative|text[- ]to[- ]video)/i;
+
+export function looksAiRelated(title: string, tags: string[], description = ""): boolean {
+  return AI_PATTERN.test(title) || tags.some((t) => AI_PATTERN.test(t)) || AI_PATTERN.test(description.slice(0, 600));
+}
 
 export function toVideo(item: VideoItem): Video {
   return {
@@ -54,6 +65,8 @@ export function toVideo(item: VideoItem): Video {
     tags: item.snippet?.tags ?? [],
     categoryId: item.snippet?.categoryId,
     isLive: Boolean(item.liveStreamingDetails) || (item.snippet?.liveBroadcastContent ?? "none") !== "none",
+    aiRelated: looksAiRelated(item.snippet?.title ?? "", item.snippet?.tags ?? [], item.snippet?.description),
+    synthetic: item.status?.containsSyntheticMedia === true,
   };
 }
 
@@ -92,7 +105,7 @@ export async function getVideosByIds(account: Account, ids: string[]): Promise<V
     const chunk = ids.slice(i, i + 50);
     const data = await googleGet<{ items?: VideoItem[] }>(
       account,
-      `${API}/videos?part=snippet,statistics,contentDetails,liveStreamingDetails&maxResults=50&id=${chunk.join(",")}`,
+      `${API}/videos?part=${VIDEO_PARTS}&maxResults=50&id=${chunk.join(",")}`,
       TTL.videos,
     );
     videos.push(...(data.items ?? []).map(toVideo));
@@ -130,11 +143,11 @@ export async function getChannelUploads(account: Account, channelId: string, max
   return getVideosByIds(account, ids.slice(0, max));
 }
 
-/** 国内の急上昇(YouTube が選ぶ人気動画チャート) */
-export async function getMostPopular(account: Account, categoryId?: string): Promise<Video[]> {
+/** その国の急上昇(YouTube が選ぶ人気動画チャート) */
+export async function getMostPopular(account: Account, region: string, categoryId?: string): Promise<Video[]> {
   const data = await googleGet<{ items?: VideoItem[] }>(
     account,
-    `${API}/videos?part=snippet,statistics,contentDetails,liveStreamingDetails&chart=mostPopular&regionCode=JP&hl=ja&maxResults=50` +
+    `${API}/videos?part=${VIDEO_PARTS}&chart=mostPopular&regionCode=${encodeURIComponent(region)}&hl=ja&maxResults=50` +
       (categoryId ? `&videoCategoryId=${encodeURIComponent(categoryId)}` : ""),
     TTL.popular,
   );
@@ -142,8 +155,11 @@ export async function getMostPopular(account: Account, categoryId?: string): Pro
 }
 
 export type SearchOptions = {
+  /** 国コード(JP, US など) */
+  region: string;
   query: string;
   days: number;
+  categoryId?: string;
   /** short = 4分未満 / long = 20分超 / medium = その間 */
   length: "any" | "short" | "medium" | "long";
 };
@@ -157,12 +173,14 @@ export async function searchTopVideos(account: Account, options: SearchOptions, 
     part: "snippet",
     type: "video",
     order: "viewCount",
-    regionCode: "JP",
-    relevanceLanguage: "ja",
+    regionCode: options.region,
     maxResults: "50",
     publishedAfter: after.toISOString(),
   });
+  const language = REGIONS.find((r) => r.code === options.region)?.language;
+  if (language) params.set("relevanceLanguage", language);
   if (options.query) params.set("q", options.query);
+  if (options.categoryId) params.set("videoCategoryId", options.categoryId);
   if (options.length !== "any") params.set("videoDuration", options.length);
   const data = await googleGet<{ items?: { id?: { videoId?: string } }[] }>(account, `${API}/search?${params}`, TTL.search);
   const ids = (data.items ?? []).map((i) => i.id?.videoId).filter((id): id is string => Boolean(id));
@@ -197,6 +215,23 @@ export async function findChannel(account: Account, input: string): Promise<RefC
   if (!item) return null;
   const summary = toChannelSummary(item);
   return { channelId: summary.channelId, title: summary.title, handle: summary.handle, thumbnail: summary.thumbnail };
+}
+
+export const REGIONS: { code: string; label: string; language: string }[] = [
+  { code: "JP", label: "日本", language: "ja" },
+  { code: "US", label: "アメリカ", language: "en" },
+  { code: "KR", label: "韓国", language: "ko" },
+  { code: "GB", label: "イギリス", language: "en" },
+  { code: "IN", label: "インド", language: "hi" },
+  { code: "BR", label: "ブラジル", language: "pt" },
+  { code: "TW", label: "台湾", language: "zh-Hant" },
+];
+
+/** AI 系の動画を探すときの検索語(「|」は「または」) */
+export function aiQuery(region: string): string {
+  return region === "JP"
+    ? "生成AI|AI生成|AIアニメ|AI動画|AI映像|Sora|Veo|Suno"
+    : "AI generated|AI animation|AI video|AI film|AI music|Sora|Veo|Midjourney";
 }
 
 export const CATEGORIES: { id: string; label: string }[] = [
