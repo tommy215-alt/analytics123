@@ -77,7 +77,7 @@ export default async function AccountsPage({ searchParams }: { searchParams: Pro
               OAuth クライアント(ウェブアプリケーション)を作り、リダイレクト URI に <code>https://(このアプリのURL)/api/oauth/callback</code> を登録する
             </li>
             <li>
-              デプロイ先の環境変数に <code>GOOGLE_CLIENT_ID</code>・<code>GOOGLE_CLIENT_SECRET</code>・<code>APP_PASSWORD</code>・<code>SESSION_SECRET</code> を設定して再デプロイする
+              デプロイ先の環境変数に <code>GOOGLE_CLIENT_ID</code>・<code>GOOGLE_CLIENT_SECRET</code>・<code>APP_PASSWORD</code> を設定して再デプロイする
             </li>
           </ol>
           <p className="sub" style={{ marginTop: 10 }}>

@@ -53,12 +53,12 @@ Vercel の「Settings」→「Environment Variables」に次を登録し、再�
 | 名前 | 内容 |
 |---|---|
 | `APP_PASSWORD` | このツールに入るためのパスワード。URL を知っている人なら誰でも入力画面に来られるので、長いものにしてください |
-| `SESSION_SECRET` | 暗号化と署名に使う32文字以上のランダムな文字列(`openssl rand -base64 32` で作れます) |
 | `GOOGLE_CLIENT_ID` | 手順2のクライアント ID |
 | `GOOGLE_CLIENT_SECRET` | 手順2のクライアント シークレット |
 | `APP_URL`(任意) | 公開 URL を固定したい場合(独自ドメインなど)。リダイレクト URI もこの URL に合わせます |
+| `SESSION_SECRET`(任意) | 暗号化と署名に使う32文字以上のランダムな文字列。未設定なら、クライアント シークレットとパスワードから自動で作ります |
 
-Google の認証情報を設定すると、`APP_PASSWORD` と `SESSION_SECRET` が無い状態では動きません(誰でも見られる状態を防ぐためです)。
+Google の認証情報を設定すると、`APP_PASSWORD` が無い状態では動きません(誰でも見られる状態を防ぐためです)。
 
 ### 4. チャンネルを連携する
 
@@ -71,7 +71,7 @@ Google の認証情報を設定すると、`APP_PASSWORD` と `SESSION_SECRET` �
 - **初期状態**: 連携情報(Google の更新トークン)は暗号化して、端末のブラウザの Cookie に保存します。追加の契約は不要ですが、**端末ごとに連携が必要** です(スマホと PC で使うなら、それぞれで連携します)。
 - **Upstash Redis を使う場合**: Vercel の Marketplace から Upstash Redis を追加する(または `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` を設定する)と、サーバー側に暗号化して保存され、一度の連携でどの端末からも見られます。切り替えたあとは、もう一度チャンネルを連携してください。
 
-`SESSION_SECRET` を変更すると、保存済みの連携情報は読めなくなります(再連携が必要です)。
+`SESSION_SECRET`(未設定の場合はパスワードかクライアント シークレット)を変更すると、保存済みの連携情報は読めなくなり、再連携とログインし直しが必要です。
 
 ## 開発
 

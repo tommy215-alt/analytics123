@@ -7,8 +7,17 @@ export const config = {
   get appPassword() {
     return env("APP_PASSWORD");
   },
+  /**
+   * 暗号化と署名の元になる秘密の値。
+   * SESSION_SECRET が無ければ、Google のクライアントシークレット(十分に長いランダム値)と
+   * パスワードから作るので、設定する環境変数は3つで済む。
+   */
   get sessionSecret() {
-    return env("SESSION_SECRET");
+    const explicit = env("SESSION_SECRET");
+    if (explicit) return explicit;
+    const clientSecret = env("GOOGLE_CLIENT_SECRET");
+    const password = env("APP_PASSWORD");
+    return clientSecret && password ? `derived:${clientSecret}:${password}` : undefined;
   },
   get googleClientId() {
     return env("GOOGLE_CLIENT_ID");
@@ -40,9 +49,8 @@ export function configProblems(): string[] {
   if (isDemoMode()) return [];
   const problems: string[] = [];
   if (!config.appPassword) problems.push("APP_PASSWORD が設定されていません。");
-  if (!config.sessionSecret || config.sessionSecret.length < 32) {
-    problems.push("SESSION_SECRET が未設定か、32文字未満です。");
-  }
+  const explicit = env("SESSION_SECRET");
+  if (explicit && explicit.length < 32) problems.push("SESSION_SECRET が32文字未満です(未設定でも動きます)。");
   return problems;
 }
 
