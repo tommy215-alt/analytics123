@@ -7,9 +7,18 @@ import { parseMidi } from "@/lib/otomad/midi";
 import { schedule, songSeconds } from "@/lib/otomad/render";
 import { generateSong, STYLES, type Song, type Style } from "@/lib/otomad/song";
 
+/** 一度に切り分けて使う長さの上限(秒) */
 const MAX_VOICE_SEC = 90;
+/** 読み込んだ素材として保持する長さの上限(秒)。長い動画はここまでを読み込む */
+const MAX_SOURCE_SEC = 600;
+const MAX_FILE_BYTES = 500 * 1024 * 1024;
 
 type Voice = { buffer: AudioBuffer; name: string; slices: Slice[] };
+
+/** 読み込んだ元の素材(音声だけを取り出して1本にまとめたもの) */
+type Source = { buffer: AudioBuffer; name: string; videoUrl: string | null };
+
+const mmss = (sec: number): string => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
 
 type AudioWindow = Window & { webkitAudioContext?: typeof AudioContext };
 
@@ -51,6 +60,10 @@ export function Studio() {
   const endTimer = useRef<number | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [source, setSource] = useState<Source | null>(null);
+  const [rangeStart, setRangeStart] = useState(0);
+  const [rangeLength, setRangeLength] = useState(30);
 
   const [voice, setVoice] = useState<Voice | null>(null);
   const [enabled, setEnabled] = useState<boolean[]>([]);
@@ -124,22 +137,49 @@ export function Studio() {
     setSeed(Math.floor(Math.random() * 100000) + 1);
   }, []);
 
+  /** 元の素材のうち、指定した範囲だけを切り出して解析する */
+  const applyRange = useCallback(
+    (from: Source, start: number, length: number) => {
+      const ctx = audio();
+      const rate = from.buffer.sampleRate;
+      const first = Math.max(0, Math.min(from.buffer.length - 1, Math.floor(start * rate)));
+      const count = Math.max(1, Math.min(from.buffer.length - first, Math.floor(Math.min(length, MAX_VOICE_SEC) * rate)));
+      const excerpt = ctx.createBuffer(1, count, rate);
+      excerpt.getChannelData(0).set(from.buffer.getChannelData(0).subarray(first, first + count));
+      const whole = first === 0 && count === from.buffer.length;
+      adoptBuffer(excerpt, whole ? from.name : `${from.name}(${mmss(start)}から${Math.round(count / rate)}秒)`);
+    },
+    [adoptBuffer, audio],
+  );
+
+  const replaceSource = useCallback((next: Source | null) => {
+    setSource((current) => {
+      if (current?.videoUrl) URL.revokeObjectURL(current.videoUrl);
+      return next;
+    });
+  }, []);
+
   const loadFiles = useCallback(
     async (files: FileList | null) => {
       if (!files || files.length === 0) return;
       stop();
-      setBusy("素材を読み込んでいます…");
+      const list = Array.from(files).slice(0, 12);
+      if (list.some((file) => file.size > MAX_FILE_BYTES)) {
+        setError("ファイルが大きすぎます(1つ500MBまで)。動画を短く切り出してから入れてください。");
+        return;
+      }
+      const hasVideo = list.some((file) => file.type.startsWith("video/"));
+      setBusy(hasVideo ? "動画から音声を取り出しています…(長い動画は時間がかかります)" : "素材を読み込んでいます…");
       try {
         const ctx = audio();
         const decoded: AudioBuffer[] = [];
-        for (const file of Array.from(files).slice(0, 12)) {
-          decoded.push(await ctx.decodeAudioData(await file.arrayBuffer()));
-        }
-        // 複数の素材は、すき間を空けて1本につなぐ
-        const gap = Math.floor(ctx.sampleRate * 0.15);
-        const limit = Math.floor(ctx.sampleRate * MAX_VOICE_SEC);
-        const total = Math.min(limit, decoded.reduce((sum, b) => sum + b.length + gap, 0));
-        const joined = ctx.createBuffer(1, total, ctx.sampleRate);
+        for (const file of list) decoded.push(await ctx.decodeAudioData(await file.arrayBuffer()));
+
+        // 音声だけをモノラルにして、複数の素材はすき間を空けて1本につなぐ
+        const gap = decoded.length > 1 ? Math.floor(ctx.sampleRate * 0.15) : 0;
+        const limit = Math.floor(ctx.sampleRate * MAX_SOURCE_SEC);
+        const total = Math.min(limit, decoded.reduce((sum, b) => sum + b.length + gap, 0) - gap);
+        const joined = ctx.createBuffer(1, Math.max(1, total), ctx.sampleRate);
         const out = joined.getChannelData(0);
         let offset = 0;
         for (const buffer of decoded) {
@@ -150,14 +190,29 @@ export function Studio() {
           offset += buffer.length + gap;
           if (offset >= total) break;
         }
-        adoptBuffer(joined, files.length === 1 ? files[0].name : `${files.length}個の素材`);
+
+        const single = list.length === 1 ? list[0] : null;
+        const next: Source = {
+          buffer: joined,
+          name: single ? single.name : `${list.length}個の素材`,
+          videoUrl: single && single.type.startsWith("video/") ? URL.createObjectURL(single) : null,
+        };
+        replaceSource(next);
+        const length = Math.min(30, joined.duration);
+        setRangeStart(0);
+        setRangeLength(joined.duration <= MAX_VOICE_SEC ? Math.ceil(joined.duration) : 30);
+        applyRange(next, 0, joined.duration <= MAX_VOICE_SEC ? joined.duration : length);
       } catch {
-        setError("読み込めませんでした。mp3・wav・m4a などの音声ファイルを選んでください。");
+        setError(
+          hasVideo
+            ? "この動画から音声を取り出せませんでした。mp4(一般的なスマホの動画)か mov で試すか、別のブラウザで開いてください。"
+            : "読み込めませんでした。mp3・wav・m4a などの音声ファイルか、mp4 などの動画ファイルを選んでください。",
+        );
       } finally {
         setBusy("");
       }
     },
-    [adoptBuffer, audio, stop],
+    [audio, replaceSource, stop, applyRange],
   );
 
   const loadDemo = useCallback(() => {
@@ -167,11 +222,12 @@ export function Studio() {
       const samples = makeDemoVoice(ctx.sampleRate);
       const buffer = ctx.createBuffer(1, samples.length, ctx.sampleRate);
       buffer.getChannelData(0).set(samples);
+      replaceSource(null);
       adoptBuffer(buffer, "お試し音声(合成)");
     } catch (e) {
       setError(e instanceof Error ? e.message : "音声を準備できませんでした。");
     }
-  }, [adoptBuffer, audio, stop]);
+  }, [adoptBuffer, audio, replaceSource, stop]);
 
   const toggleRecording = useCallback(async () => {
     if (recording) {
@@ -189,6 +245,7 @@ export function Studio() {
         setRecording(false);
         try {
           const buffer = await audio().decodeAudioData(await new Blob(chunks).arrayBuffer());
+          replaceSource(null);
           adoptBuffer(buffer, "録音した声");
         } catch {
           setError("録音を読み込めませんでした。");
@@ -201,7 +258,7 @@ export function Studio() {
     } catch {
       setError("マイクを使えませんでした。ブラウザでマイクの使用を許可してください。");
     }
-  }, [adoptBuffer, audio, recording, stop]);
+  }, [adoptBuffer, audio, recording, replaceSource, stop]);
 
   const loadMidi = useCallback(async (files: FileList | null) => {
     const file = files?.[0];
@@ -291,8 +348,8 @@ export function Studio() {
         </div>
         <div className="otomad-buttons">
           <label className="btn primary">
-            音声ファイルを選ぶ
-            <input className="visually-hidden" type="file" accept="audio/*,video/mp4" multiple onChange={(e) => void loadFiles(e.target.files)} />
+            音声・動画ファイルを選ぶ
+            <input className="visually-hidden" type="file" accept="audio/*,video/*" multiple onChange={(e) => void loadFiles(e.target.files)} />
           </label>
           <button className={recording ? "btn danger" : "btn"} type="button" onClick={() => void toggleRecording()}>
             {recording ? "■ 録音を止める" : "マイクで録音"}
@@ -302,6 +359,46 @@ export function Studio() {
           </button>
         </div>
         {busy && <p className="sub" style={{ marginTop: 8 }}>{busy}</p>}
+
+        {source && (source.videoUrl || source.buffer.duration > MAX_VOICE_SEC) && (
+          <div className="otomad-range">
+            {source.videoUrl && (
+              // eslint-disable-next-line jsx-a11y/media-has-caption
+              <video ref={videoRef} src={source.videoUrl} controls playsInline preload="metadata" />
+            )}
+            <p className="sub">
+              {source.name}・音声 {mmss(source.buffer.duration)}
+              {source.buffer.duration >= MAX_SOURCE_SEC - 1 ? "(先頭10分まで読み込みました)" : ""}。使いたい場面を選んでください(一度に{MAX_VOICE_SEC}秒まで)。
+            </p>
+            <div className="sliders">
+              <label>
+                <span>開始 {mmss(rangeStart)}</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={Math.max(0, Math.floor(source.buffer.duration - 1))}
+                  step={0.5}
+                  value={rangeStart}
+                  onChange={(e) => setRangeStart(Number(e.target.value))}
+                />
+              </label>
+              <label>
+                <span>長さ {rangeLength}秒</span>
+                <input type="range" min={2} max={MAX_VOICE_SEC} step={1} value={rangeLength} onChange={(e) => setRangeLength(Number(e.target.value))} />
+              </label>
+            </div>
+            <div className="otomad-buttons" style={{ marginTop: 8 }}>
+              {source.videoUrl && (
+                <button className="btn" type="button" onClick={() => setRangeStart(Math.floor((videoRef.current?.currentTime ?? 0) * 2) / 2)}>
+                  動画の再生位置を開始にする
+                </button>
+              )}
+              <button className="btn primary" type="button" onClick={() => applyRange(source, rangeStart, rangeLength)}>
+                この範囲を声ネタにする
+              </button>
+            </div>
+          </div>
+        )}
 
         {voice && (
           <>

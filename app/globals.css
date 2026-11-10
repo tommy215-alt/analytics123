@@ -1370,3 +1370,19 @@ code {
   accent-color: var(--accent);
   margin-right: 4px;
 }
+
+.otomad-range {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--grid);
+}
+
+.otomad-range video {
+  display: block;
+  width: 100%;
+  max-height: 240px;
+  margin-bottom: 8px;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
